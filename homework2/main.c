@@ -1,7 +1,12 @@
+// #define _POSIX_C_SOURCE
+#define _GNU_SOURCE 1
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+
+// #define __USE_POSIX
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -10,39 +15,35 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
-#define FIFO_NAME "myfifo1"
+
+#define FIFO1_NAME "myfifo1"
+#define FIFO2_NAME "myfifo2"
 
 volatile sig_atomic_t child_counter = 0;
 
 // Signal handler function
 void sigchld_handler(int signum)
 {
-    pid_t pid;
     int status;
+    pid_t pid;
 
-    // Reap terminated child processes
+    // Reap all children that have exited
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
     {
-        if (WIFEXITED(status))
-        {
-            // Child process terminated normally
-            printf("Child process %d terminated with exit status: %d\n", pid, WEXITSTATUS(status));
-        }
-        else
-        {
-            // Child process terminated abnormally
-            printf("Child process %d terminated abnormally\n", pid);
-        }
-        child_counter--;
+        // Print process ID of the terminated child
+        char buffer[256];
+        int len = snprintf(buffer, sizeof(buffer), "Child process %d exited.\n", pid);
+        write(STDOUT_FILENO, buffer, len);
+        child_counter++;
     }
 }
 
-pid_t create_child();
-
 int main(int argc, char *argv[])
 {
-
-    if (mkfifo(FIFO_NAME, 0777) == -1)
+    argv = malloc(sizeof(char *) * 2);
+    argc = 2;
+    argv[1] = "5";
+    if (mkfifo(FIFO1_NAME, 0777) == -1)
     {
         if (errno != EEXIST)
         {
@@ -51,100 +52,167 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (signal(SIGCHLD, sigchld_handler) == SIG_ERR)
+    //    //signal handler using sigaction
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sa.sa_flags = SA_RESTART;
+
+    // set up signal handler
+    sigaction(SIGCHLD, &sa, NULL);
+
+    if (mkfifo(FIFO2_NAME, 0777) == -1)
     {
-        perror("signal");
-        exit(EXIT_FAILURE);
+        if (errno != EEXIST)
+        {
+            printf("Could not create fifo file\n");
+            return 1;
+        }
     }
+
+    int numberCount;
 
     // pid_t pid = create_child();
 
     pid_t pid = fork();
     printf("Created fork\n");
 
-    child_counter++;
-
     if (pid > 0)
     {
-        printf("Starting parent\n");
+        child_counter++;
+
         // parent
-        char *arr;
 
-        arr = calloc(26, sizeof(int));
+        // create another child
+        pid = fork();
 
-        int status;
-
-        printf("Trying to open fifo\n");
-        int fd = open(FIFO_NAME, O_RDONLY);
-
-
-        printf("Starting wait for child\n");
-        waitpid(pid, &status, 0);
-        printf("Child wait is over\n");
-
-        printf("Starting read\n");
-
-        if (read(fd, arr, sizeof(char) * 25) == -1)
+        if (pid > 0) // parent
         {
-            return 2;
+            printf("Starting parent\n");
+
+            child_counter++;
+
+            // get integer
+            int status;
+
+            if (argc < 2)
+            {
+                printf("Please provide an integer argument\n");
+                return 1;
+            }
+
+            numberCount = atoi(argv[1]);
+
+            struct sigaction sa;
+            sa.sa_handler = sigchld_handler;
+            sa.sa_flags = SA_RESTART;
+            // set up signal handler
+            sigaction(SIGCHLD, &sa, NULL);
+
+            int array[] = {1, 2, 3, 4, 5};
+
+            // write to fifo1 and fifo2
+            int fd1 = open(FIFO1_NAME, O_WRONLY);
+            int fd2 = open(FIFO2_NAME, O_WRONLY);
+
+            write(fd1, array, sizeof(array));
+            write(fd2, array, sizeof(array));
+
+            // send "multiplication to fifo2"
+            char *command = "multiply";
+            write(fd2, command, strlen(command) + 1);
+
+            while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+            {
+                // Print process ID of the terminated child
+                char buffer[256];
+                int len = snprintf(buffer, sizeof(buffer), "Child process %d exited.\n", pid);
+                write(STDOUT_FILENO, buffer, len);
+                child_counter++;
+            }
+            
+            close(fd1);
+            close(fd2);
+
+            return 0;
         }
 
-        printf("Read is over\n");
+        if (pid == 0)
+        {
+            printf("Started child1\n");
+        sleep(10);
 
-        arr[25] = '\0';
+            // this one reads from fifo1, read numbers and perform summation
+            // writes the result to second fifo
 
-            write(STDOUT_FILENO, arr, sizeof(char)*25);
-        free(arr);
-        close(fd);
-        return 0;
+            int fd1 = open(FIFO1_NAME, O_RDONLY);
+            int fd2 = open(FIFO2_NAME, O_WRONLY);
+
+            int array[numberCount];
+            read(fd1, array, sizeof(array));
+
+            int sum = 0;
+            for (int i = 0; i < numberCount; i++)
+            {
+                sum += array[i];
+            }
+
+            write(fd2, &sum, sizeof(sum));
+
+
+            printf("Child1 exitting..\n");
+
+            exit(-1);
+        }
+
+        if (pid < 0)
+        {
+            // error forking
+        }
     }
 
     if (pid == 0)
     {
-        printf("Started child\n");
-        char *arr;
+        printf("Started2 child\n");
+        // opens second fifo, reads the command and performs multiplication
+        // prints the sum of the results of all child processes
+        sleep(10);
+        int fd2 = open(FIFO2_NAME, O_RDONLY);
 
-        arr = calloc(26, sizeof(char));
+        int array[numberCount];
+        read(fd2, array, sizeof(array));
 
-        for (int i = 0; i < 26; ++i)
+        //print array
+        printf("child 2 read array\n");
+        for (int i = 0; i < numberCount; i++)
         {
-            arr[i] = i + 'A';
+            printf("%d ", array[i]);
         }
 
-        int fd = open(FIFO_NAME, O_WRONLY);
+        char command[256];
+        read(fd2, command, sizeof(command));
 
-        printf("Writing child\n");
-
-        if (write(fd, arr, sizeof(char) * 26) == -1)
+        if (strcmp(command, "multiply") == 0)
         {
-            exit(2);
+            int product = 1;
+            for (int i = 0; i < numberCount; i++)
+            {
+                product *= array[i];
+            }
+
+            printf("Product: %d\n", product);
         }
-        
-        printf("Have written: ");
-        write(STDOUT_FILENO, arr, 26);
 
-        printf("\nWriting is over, child\n");
 
-        free(arr);
-        close(fd);
-
-        printf("Child exitting..\n");
-        exit(0);
+        printf("Child2 exitting..\n");
     }
 
     if (pid < 0)
     {
         // error forking
     }
-}
 
-pid_t create_child()
-{
-    pid_t pid = fork();
-    if (pid > 0)
-    {
-        // Parent process
-        child_counter++;
-    }
-    return pid;
+    unlink(FIFO1_NAME);
+    unlink(FIFO2_NAME);
+
+    return 0;
 }
